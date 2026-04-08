@@ -30,9 +30,11 @@ CATEGORY_MAP = {
     "ifd":          "Food & Dining",
     "parmegian":    "Food & Dining",
     "zarelli":      "Food & Dining",
+    "tauste":       "Food & Dining",
     "posto":        "Transportation",
     "combustivel":  "Transportation",
     "uber":         "Transportation",
+    "uberrides":    "Transportation",
     "99":           "Transportation",
     "taxi":         "Transportation",
     "transporte":   "Transportation",
@@ -45,14 +47,16 @@ CATEGORY_MAP = {
     "tim":          "Bills & Utilities",
     "vivo":         "Bills & Utilities",
     "claro":        "Bills & Utilities",
-    "oi ":          "Bills & Utilities",
     "energia":      "Bills & Utilities",
     "agua":         "Bills & Utilities",
     "light":        "Bills & Utilities",
+    "iof":          "Bills & Utilities",
     "netflix":      "Entertainment",
     "spotify":      "Entertainment",
     "amazon":       "Entertainment",
     "cinema":       "Entertainment",
+    "claude":       "Entertainment",
+    "subscription": "Entertainment",
     "shopping":     "Shopping",
     "loja":         "Shopping",
     "magazine":     "Shopping",
@@ -64,6 +68,13 @@ CATEGORY_MAP = {
     "universidade": "Education",
 }
 
+# ── Regex para detectar parcelas no formato "Parcela X/Y" ────
+PARCELA_PATTERN = re.compile(
+    r"[- ]*parcela\s+(\d+)/(\d+)",
+    re.IGNORECASE
+)
+
+
 def detectar_categoria(descricao: str) -> str:
     """Detecta a categoria com base em palavras-chave na descrição."""
     descricao_lower = descricao.lower()
@@ -71,6 +82,33 @@ def detectar_categoria(descricao: str) -> str:
         if keyword in descricao_lower:
             return category
     return "Other"
+
+
+def processar_parcela(descricao: str) -> tuple[str, str, int]:
+    """
+    Verifica se a descrição contém informação de parcela.
+    Retorna uma tupla: (descricao_limpa, frequency, durationInMonths)
+
+    Exemplos:
+      "Baby Care - Parcela 4/10"  →  ("Baby Care", "Monthly", 7)
+      "Notebook - Parcela 1/12"   →  ("Notebook", "Monthly", 12)
+      "Uber Uber * Pending"       →  ("Uber Uber * Pending", "One-time", 1)
+    """
+    match = PARCELA_PATTERN.search(descricao)
+
+    if match:
+        parcela_atual = int(match.group(1))
+        total_parcelas = int(match.group(2))
+
+        # Meses restantes = total - parcela_atual + 1
+        duration = total_parcelas - parcela_atual + 1
+
+        # Remove o trecho " - Parcela X/Y" da descrição
+        descricao_limpa = PARCELA_PATTERN.sub("", descricao).strip(" -").strip()
+
+        return descricao_limpa, "Monthly", duration
+
+    return descricao, "One-time", 1
 
 
 # ── Parser CSV do Nubank ──────────────────────────────────────
@@ -83,34 +121,39 @@ def parse_csv(conteudo: str) -> list[dict]:
     df = pd.read_csv(StringIO(conteudo))
     df.columns = df.columns.str.strip().str.lower()
 
-    # Valida colunas obrigatórias
     required = {"date", "title", "amount"}
     if not required.issubset(set(df.columns)):
-        raise ValueError(f"CSV inválido. Colunas esperadas: {required}. Encontradas: {set(df.columns)}")
+        raise ValueError(
+            f"CSV inválido. Colunas esperadas: {required}. "
+            f"Encontradas: {set(df.columns)}"
+        )
 
     transacoes = []
     for _, row in df.iterrows():
-        valor = abs(float(row["amount"]))  # garante positivo
+        valor = abs(float(row["amount"]))
         if valor <= 0:
-            continue  # ignora estornos ou entradas
+            continue
 
-        descricao = str(row["title"]).strip()
-        data_raw  = str(row["date"]).strip()
+        descricao_raw = str(row["title"]).strip()
+        data_raw      = str(row["date"]).strip()
 
-        # Converte data para yyyy-MM-dd
         try:
             data = datetime.strptime(data_raw, "%Y-%m-%d").strftime("%Y-%m-%d")
         except ValueError:
-            data = data_raw  # mantém como está se não conseguir parsear
+            data = data_raw
+
+        # ✅ Detecta parcelas
+        descricao, frequency, duration = processar_parcela(descricao_raw)
 
         transacoes.append({
-            "description": descricao,
-            "amount":      valor,
-            "startDate":   data,
-            "category":    detectar_categoria(descricao),
-            "frequency":   "One-time",
-            "paymentType": "Cartão de Crédito",
-            "paid":        False,
+            "description":     descricao,
+            "amount":          valor,
+            "startDate":       data,
+            "category":        detectar_categoria(descricao),
+            "frequency":       frequency,
+            "durationInMonths": duration,
+            "paymentType":     "Cartão de Crédito",
+            "paid":            False,
         })
 
     return transacoes
@@ -120,16 +163,13 @@ def parse_csv(conteudo: str) -> list[dict]:
 
 def parse_ofx(conteudo: str) -> list[dict]:
     """
-    Processa OFX do Nubank (formato SGML, não XML puro).
+    Processa OFX do Nubank (formato SGML).
     Extrai DTPOSTED, TRNAMT e MEMO de cada <STMTTRN>.
     """
     transacoes = []
-
-    # Divide em blocos de transação
     blocos = re.findall(r"<STMTTRN>(.*?)</STMTTRN>", conteudo, re.DOTALL)
 
     for bloco in blocos:
-        # Extrai campos
         dtposted = re.search(r"<DTPOSTED>(.*?)[\r\n<]", bloco)
         trnamt   = re.search(r"<TRNAMT>(.*?)[\r\n<]", bloco)
         memo     = re.search(r"<MEMO>(.*?)[\r\n<]", bloco)
@@ -138,29 +178,30 @@ def parse_ofx(conteudo: str) -> list[dict]:
             continue
 
         valor_raw = float(trnamt.group(1).strip())
-
-        # No OFX do Nubank os débitos vêm negativos — ignora créditos
         if valor_raw >= 0:
-            continue
+            continue  # ignora créditos/estornos
 
-        valor     = abs(valor_raw)
-        descricao = memo.group(1).strip()
+        valor         = abs(valor_raw)
+        descricao_raw = memo.group(1).strip()
 
-        # Converte data OFX: "20251005000000[-3:BRT]" → "2025-10-05"
-        data_raw = dtposted.group(1).strip()[:8]  # pega só "20251005"
+        data_raw = dtposted.group(1).strip()[:8]
         try:
             data = datetime.strptime(data_raw, "%Y%m%d").strftime("%Y-%m-%d")
         except ValueError:
             data = data_raw
 
+        # ✅ Detecta parcelas
+        descricao, frequency, duration = processar_parcela(descricao_raw)
+
         transacoes.append({
-            "description": descricao,
-            "amount":      valor,
-            "startDate":   data,
-            "category":    detectar_categoria(descricao),
-            "frequency":   "One-time",
-            "paymentType": "Cartão de Crédito",
-            "paid":        False,
+            "description":      descricao,
+            "amount":           valor,
+            "startDate":        data,
+            "category":         detectar_categoria(descricao),
+            "frequency":        frequency,
+            "durationInMonths": duration,
+            "paymentType":      "Cartão de Crédito",
+            "paid":             False,
         })
 
     return transacoes
@@ -170,11 +211,6 @@ def parse_ofx(conteudo: str) -> list[dict]:
 
 @app.route("/processar-extrato", methods=["POST"])
 def processar_extrato():
-    """
-    Recebe um arquivo CSV ou OFX via multipart/form-data.
-    Campo esperado: 'file'
-    Retorna: JSON com lista de transações processadas.
-    """
     if "file" not in request.files:
         return jsonify({"erro": "Nenhum arquivo enviado. Use o campo 'file'."}), 400
 
@@ -205,7 +241,7 @@ def processar_extrato():
         return jsonify({"erro": f"Erro interno: {str(e)}"}), 500
 
 
-# ── Health check (usado pelo Java para verificar se Python está vivo) ──
+# ── Health check ──────────────────────────────────────────────
 
 @app.route("/health", methods=["GET"])
 def health():

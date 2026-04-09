@@ -3,8 +3,8 @@ name: Python Extrato CI/CD
 on:
   push:
     branches: [ main ]
-    paths:
-      - 'domus_python/**'
+    #paths:
+     # - 'domus_python/**'
 
 jobs:
   build:

@@ -2,7 +2,7 @@
 ================================================================
 Domus — Microserviço de Processamento de Extratos
 ================================================================
-Responsável por receber arquivos CSV/OFX do Nubank,
+Responsável por receber arquivos CSV/OFX,
 processar e retornar JSON estruturado para o backend Java.
 
 Porta padrão: 5000

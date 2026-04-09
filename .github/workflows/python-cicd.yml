@@ -4,7 +4,7 @@ on:
   push:
     branches: [ main ]
     paths:
-      - 'domus-extrato/**'
+      - 'domus_python/**'
 
 jobs:
   build:
@@ -22,7 +22,7 @@ jobs:
 
     - name: Build Docker Image
       run: |
-        cd domus-extrato
+        cd domus_python
         docker build -f Dockerfile.python -t ${{ secrets.DOCKER_USERNAME }}/domus-extrato:latest .
 
     - name: Push Docker Image
